@@ -1,0 +1,458 @@
+-- Create Database and Schema --
+
+CREATE DATABASE GlobalSuperStore;
+
+USE GlobalSuperStore;
+
+
+CREATE SCHEMA Customer;
+CREATE SCHEMA Sales;
+CREATE SCHEMA Product;
+
+-- Import GlobalOrders, Products, Customers CSV UTC-8 tables
+-- via Object Explorer, database Task
+
+-- Set Profit data type to money to prevent lost values
+-- Set other money based values to money data type to
+-- not have to round in later queries
+
+
+
+-- Review Tables & w/Joins --
+
+SELECT * FROM Sales.GlobalOrders -- Row Count 51,290
+
+SELECT 
+	  c.Customer_ID,
+	  c.Customer_Name,
+	  o.Order_ID,
+	  o.Order_Date
+FROM Sales.GlobalOrders o
+JOIN Customer.Customers c
+ON o.Customer_ID = c.Customer_ID; -- Row Count 51,290
+
+
+-- Is a many to many relationship. Create unique product identifer to create one to many relationship
+SELECT
+	  c.Customer_ID,
+	  c.Customer_Name,
+	  o.Order_ID,
+	  o.Order_Date,
+	  p.Product_Name,
+	  p.Category
+FROM Sales.GlobalOrders o
+JOIN Customer.Customers c
+ON o.Customer_ID = c.Customer_ID
+JOIN Product.Products p
+ON o.Product_ID = p.Product_ID
+ORDER BY o.order_id DESC; -- Row Count 55,996 (Product IDs, carry multiple product names)
+
+-- Now one to many relationship with derived column Product_Name_ID
+SELECT
+	  g.Row_ID,
+	  g.Ship_Date,
+	  g.Customer_ID,
+	  p.Product_Name_ID,
+	  p.Category,
+	  p.Sub_Category
+FROM Sales.GlobalOrders g
+JOIN Product.Products p
+ON g.Product_Name_ID = p.Product_Name_ID
+ORDER BY Row_ID; -- 51,290 rows
+
+
+
+-- Split Customer_Name Into First & Last Name --
+
+
+BEGIN TRANSACTION;
+
+-- Add name columns to prepare for INSERT of split Customer_Name
+
+ALTER TABLE Customer.Customers 
+ADD First_Name nvarchar(50),
+	Last_Name nvarchar(50);
+
+SELECT * FROM Customer.Customers;
+
+COMMIT;
+
+
+
+-- Create temp table to move Customer.Customers values to during the transformation
+-- of Customer_Name to First & Last Name columns
+
+DROP TABLE IF EXISTS #CustomerNames
+  CREATE TABLE #CustomerNames
+  (Customer_ID nvarchar(50),
+   Segment nvarchar(50),
+   First_Name nvarchar(50),
+   Last_Name nvarchar(50)
+   );
+
+
+-- INSERT w/CTE Customer.Customers values with splitting Customer_Name string
+-- to two new columns First_Name, Last_Name
+
+WITH NameUpdate 
+(Customer_ID, 
+ Segment, 
+ First_name, 
+ Last_Name) 
+ AS
+(SELECT Customer_ID,
+	    Segment,
+		CASE WHEN CHARINDEX(' ',Customer_Name)>0 THEN SUBSTRING(Customer_Name,1,CHARINDEX(' ',Customer_Name)-1)
+ELSE Customer_Name END,
+
+CASE WHEN CHARINDEX(' ',Customer_Name)>0 THEN SUBSTRING(Customer_Name,CHARINDEX(' ',Customer_Name)+1,
+LEN(Customer_Name)) ELSE NULL END
+	
+FROM Customer.Customers)
+INSERT INTO #CustomerNames
+(Customer_ID, 
+ Segment, 
+ First_Name, 
+ Last_Name)
+SELECT * FROM NameUpdate;
+
+
+SELECT * FROM #CustomerNames;
+
+/*
+SUBSTRING(Customer_Name, 1, CASE WHEN CHARINDEX(' ', Customer_Name)>0 
+		THEN CHARINDEX(' ', Customer_Name) - 1 ELSE LEN(Customer_Name) END ),
+		
+		REVERSE(SUBSTRING(REVERSE(Customer_Name), 1, CASE WHEN CHARINDEX(' ', REVERSE(Customer_Name))>0
+		THEN CHARINDEX(' ', REVERSE(Customer_Name)) - 1 ELSE LEN(REVERSE(Customer_Name)) END))
+*/
+
+-- Truncate Customer.Customers, drop column Customer_Name
+-- then INSERT all values from #CustomerNames temp table
+
+BEGIN TRANSACTION;
+
+TRUNCATE TABLE Customer.Customers;
+
+ALTER TABLE Customer.Customers
+DROP COLUMN IF EXISTS Customer_Name;
+
+INSERT INTO Customer.Customers
+SELECT Customer_ID,
+	   Segment,
+	   First_Name,
+	   Last_Name
+FROM #CustomerNames;
+
+SELECT * FROM Customer.Customers;
+
+ROLLBACK;
+
+COMMIT;
+
+
+/*
+-- Create Product Table and Insert Values --
+
+BEGIN TRANSACTION;
+
+
+DROP TABLE IF EXISTS Product.Products
+  CREATE TABLE Product.Products
+  (Product_Name_ID nvarchar(250),
+   Product_Name nvarchar(200),
+   Category nvarchar(50),
+   Sub_Category nvarchar(50)
+   );
+
+
+WITH ProductInsert 
+ AS
+(SELECT
+	   DISTINCT(Product_ID),
+	   Product_Name_ID,
+	   Category,
+	   Sub_Category
+	
+FROM Sales.Global_Superstore_All_Data
+ORDER BY Product_ID)
+INSERT INTO #CustomerNames
+(Customer_ID, 
+ Segment, 
+ First_Name, 
+ Last_Name)
+SELECT * FROM NameUpdate;
+
+
+SELECT DISTINCT(Product_Name) + ' - ' + Product_ID AS Product_Name_ID
+FROM sales.global_superstore_all_data;
+*/
+
+
+
+-- Create New Foreign & Primary Key Using a Concatenation of Product Name & ID --
+
+BEGIN TRANSACTION;
+
+
+/*
+Add column to the GlobalOrders table to create a foreign key, 
+the primary key of the Products table
+*/
+
+ALTER TABLE Sales.GlobalOrders
+ADD Product_Name_ID nvarchar(250);
+
+
+/*
+Create a temp table to pull raw data from denormalized Global Superstore fact table
+and create a dervived column with concatenated values for the
+new foreign key
+*/
+
+DROP TABLE IF EXISTS #ProductInsert
+CREATE TABLE #ProductInsert
+(Row_ID int,
+ Product_Identify nvarchar(250));
+
+
+/*
+CTE to insert data to #ProductInsert temp table
+*/
+
+WITH ProductStuff
+ AS
+(SELECT
+	   Row_ID,
+	   Product_Name + ' - ' + Product_ID AS Product_Identify
+FROM Sales.Global_Superstore_All_Data)
+INSERT INTO #ProductInsert
+(Row_ID,
+ Product_Identify)
+SELECT * FROM ProductStuff;
+
+
+SELECT * FROM #ProductInsert
+
+
+/*
+Update the GlobalOrders table with the new
+foreign key with the #ProductInsert temp table,
+using a join to align all rows with the proper values
+*/
+
+UPDATE Sales.GlobalOrders
+SET Product_Name_ID = p.Product_Identify
+FROM Sales.GlobalOrders g
+JOIN #ProductInsert p
+ON g.Row_ID = p.Row_ID;
+
+
+SELECT * FROM Sales.GlobalOrders;
+
+
+/*
+Add values to Products table
+*/
+
+INSERT INTO Product.Products
+SELECT
+	  DISTINCT(Product_Name) + ' - ' + Product_ID AS Product_Name_ID,
+	  Product_Name,
+	  Category,
+	  Sub_Category
+FROM Sales.Global_Superstore_All_Data;
+
+SELECT * FROM Product.Products;
+
+
+/*
+Verify that there were no duplicate
+rows created
+*/
+
+SELECT
+	  g.Row_ID,
+	  g.Ship_Date,
+	  g.Customer_ID,
+	  p.Product_Name_ID,
+	  p.Category,
+	  p.Sub_Category
+FROM Sales.GlobalOrders g
+JOIN Product.Products p
+ON g.Product_Name_ID = p.Product_Name_ID
+ORDER BY Row_ID; 
+
+SELECT * 
+FROM Sales.GlobalOrders
+WHERE Row_ID = 1;
+
+
+COMMIT;
+
+
+
+
+-- Customer Analysis --
+
+
+
+-- Customer Churn Rate --
+
+-- Total Customer Orders Between Given Dates
+
+SELECT 
+	  DISTINCT(c.Customer_ID),
+	  c.First_Name,
+	  c.Last_Name,
+	  TotalOrders = COUNT(DISTINCT(o.Order_ID))
+FROM Sales.GlobalOrders o
+JOIN Customer.Customers c
+ON o.Customer_ID = c.Customer_ID
+WHERE o.Order_Date  BETWEEN '01-01-2011' AND '01-01-2013'
+GROUP BY c.Customer_ID, c.First_Name, c.Last_Name ;
+
+
+
+-- ITERATIVE MODEL FOR CHURN -- 
+
+
+
+-- Total Customer Orders on Month & Year
+
+
+SELECT 
+	  DISTINCT(c.Customer_ID),
+	  c.First_Name,
+	  c.Last_Name,
+	  TotalOrders = COUNT(DISTINCT(o.Order_ID))
+FROM Sales.GlobalOrders o
+JOIN Customer.Customers c
+ON o.Customer_ID = c.Customer_ID
+WHERE MONTH(o.Order_Date)=1
+AND
+	  YEAR(o.Order_Date)=2012
+GROUP BY c.Customer_ID, c.First_Name, c.Last_Name;
+
+
+
+
+-- Total Customers on Month & Year
+
+WITH JanuaryPool
+AS
+(SELECT
+	   YearOfOrder = YEAR(o.Order_Date),
+	  MonthOfOrder = MONTH(o.Order_Date),
+	  TotalCustomers = COUNT(DISTINCT(c.Customer_ID))
+FROM Sales.GlobalOrders o
+JOIN Customer.Customers c
+ON o.Customer_ID = c.Customer_ID
+WHERE MONTH(o.Order_Date)=1
+AND	   YEAR(o.Order_Date)=2012
+GROUP BY o.Order_Date)
+
+SELECT
+	  YearOfOrder,
+	  MonthOfOrder,
+	  TotalCustomers
+FROM JanuaryPool
+WHERE YearOfOrder = 2012
+GROUP BY YearOfOrder, MonthOfOrder, TotalCustomers;
+
+	  
+-- How many months since customer order order date from the defined date in DATEDIFF
+
+WITH VisitLog
+AS
+(SELECT 
+	   DISTINCT(c.Customer_ID),
+	   MonthOfVisit = DATEDIFF(MONTH, '2011-01-01', o.Order_Date),
+	   o.Order_Date
+FROM Sales.GlobalOrders o
+JOIN Customer.Customers c
+ON o.Customer_ID = c.Customer_ID)
+
+SELECT
+	  Customer_ID,
+	  MonthOfVisit = LEAD(MonthOfVisit, 1) OVER (PARTITION BY Customer_ID ORDER BY Customer_ID, MonthOfVisit)
+FROM VisitLog
+
+
+-- Time Lapse with Lead
+
+SELECT 
+	   c.Customer_ID,
+	   VisitMonth = LEAD(o.Order_Date, 1) OVER (PARTITION BY c.Customer_ID ORDER BY c.Customer_ID, o.Order_Date)
+FROM Sales.GlobalOrders o
+JOIN Customer.Customers c
+ON o.Customer_ID = c.Customer_ID
+ORDER BY c.Customer_ID, o.Order_Date;
+
+
+
+
+-- All CTEs combined All SELECT combined
+
+
+
+
+
+
+
+
+
+
+-- CTEs
+
+
+WITH
+Churn1
+AS
+(SELECT 
+	   DISTINCT(c.Customer_ID),
+	   o.Order_Date,
+	   MonthsFromStartDate = DATEDIFF(MONTH, '2011-01-01', o.Order_Date),
+	   NextVisitDate = LEAD(o.Order_Date, 1) OVER (PARTITION BY c.Customer_ID ORDER BY c.Customer_ID, o.Order_Date)
+FROM Sales.GlobalOrders o
+JOIN Customer.Customers c
+ON o.Customer_ID = c.Customer_ID
+GROUP BY c.Customer_ID, o.Order_Date)
+
+,
+
+Churn2
+AS
+(SELECT
+	  Customer_ID,
+	  Order_Date,
+	  MonthsFromStartDate,
+	  NextVisitDate,
+	  MonthsBetweenVisits = DATEDIFF(MONTH, Order_Date, NextVisitDate),
+	  DaysBetweenVisits = DATEDIFF(DAY, Order_Date, NextVisitDate),
+	  CustomerType = CASE
+						 WHEN DATEDIFF(MONTH, Order_Date, NextVisitDate) <= 1 THEN 'Retained'
+						 WHEN DATEDIFF(MONTH, Order_Date, NextVisitDate) > 1 THEN 'Lagger'
+						 ELSE 'Lost' END
+FROM Churn1)
+
+SELECT
+	  Customer_ID,
+	  Order_Date,
+	  MonthsFromStartDate,
+	  NextVisitDate,
+	  MonthsBetweenVisits,
+	  DaysBetweenVisits,
+	  CustomerType,
+	  MonthYear = CONCAT(FORMAT(Order_Date, 'MMMM'), '-',YEAR(Order_Date)),
+	  RetainedCustomersMoM = COUNT((CASE WHEN CustomerType = 'Retained' THEN 1 END)/
+	  COUNT(Customer_ID)) OVER (PARTITION BY MONTH(Order_Date),YEAR(Order_Date))
+FROM Churn2
+GROUP BY Customer_ID,
+		 Order_Date,
+		 MonthsFromStartDate,
+		 NextVisitDate,
+		 MonthsBetweenVisits,
+		 DaysBetweenVisits,
+		 CustomerType
+ORDER BY Customer_ID, Order_Date, MonthYear;
